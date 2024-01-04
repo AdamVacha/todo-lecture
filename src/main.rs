@@ -1,7 +1,8 @@
-use std::{fmt::Debug, fs};
+use std::{env, fmt::Debug, fs};
 
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
+use sqlx::SqliteConnection;
 
 #[derive(ValueEnum, Debug, Clone)]
 enum Command {
@@ -27,14 +28,14 @@ struct Args {
 
 impl Args {
     fn args_check(&self) -> Option<(&String, &String)> {
-        let Some(title) = &self.title else  {
-                println!("--title is required");
-                return None;
-            };
-        let Some(message) = &self.message else  {
-                println!("--message is required");
-                return None;
-            };
+        let Some(title) = &self.title else {
+            println!("--title is required");
+            return None;
+        };
+        let Some(message) = &self.message else {
+            println!("--message is required");
+            return None;
+        };
 
         Some((title, message))
     }
@@ -53,26 +54,40 @@ impl TodoList {
     fn add(&mut self, todo: Todo) {
         self.0.push(todo)
     }
+    fn print(&self) {
+        for t in &self.0 {
+            println!("{} - {}", t.title, t.message)
+        }
+    }
     fn update(&mut self, todo: Todo) {
         let to_update = self.0.iter_mut().find(|t| t.title == todo.title);
         let Some(to_update) = to_update else {
-                println!("cannot find a todo item with that title");
-                return;
-            };
+            println!("cannot find a todo item with that title");
+            return;
+        };
         to_update.message = todo.message.to_string();
     }
     fn delete(&mut self, title: &String) {
         let delete_index = self.0.iter().position(|t| &t.title == title);
         let Some(delete_index) = delete_index else {
-                println!("cannot find a todo item with that title");
-                return;
-            };
+            println!("cannot find a todo item with that title");
+            return;
+        };
         self.0.remove(delete_index);
     }
 }
 
-fn main() {
+#[tokio::main(flavor = "current_thread")]
+async fn main() {
     let args = Args::parse();
+
+    use sqlx::Connection;
+    let conn = SqliteConnection::connect(&env::var("DATABASE_URL").unwrap()).await;
+    let Ok(conn) = conn else {
+        eprintln!("cannot connect to db");
+        return;
+    };
+
     let file_str = match fs::read_to_string("data.json") {
         Ok(file) => file,
         Err(_) => {
@@ -95,11 +110,7 @@ fn main() {
                 message: args.1.to_string(),
             });
         }
-        Command::List => {
-            for t in &list.0 {
-                println!("{} - {}", t.title, t.message)
-            }
-        }
+        Command::List => list.print(),
         Command::Update => {
             let Some(args) = args.args_check() else {
                 return;
@@ -112,7 +123,7 @@ fn main() {
             })
         }
         Command::Delete => {
-            let Some(title) = args.title else  {
+            let Some(title) = args.title else {
                 println!("--title is required");
                 return;
             };
