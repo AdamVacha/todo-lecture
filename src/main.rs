@@ -1,8 +1,8 @@
-use std::{env, fmt::Debug, fs};
+use std::{env, fmt::Debug};
 
 use clap::{Parser, ValueEnum};
 use serde::{Deserialize, Serialize};
-use sqlx::SqliteConnection;
+use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
 #[derive(ValueEnum, Debug, Clone)]
 enum Command {
@@ -44,93 +44,120 @@ impl Args {
 #[derive(Debug, Serialize, Deserialize)]
 struct Todo {
     title: String,
-    message: String,
+    msg: String,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
-struct TodoList(Vec<Todo>);
-
-impl TodoList {
-    fn add(&mut self, todo: Todo) {
-        self.0.push(todo)
-    }
-    fn print(&self) {
-        for t in &self.0 {
-            println!("{} - {}", t.title, t.message)
+impl Todo {
+    async fn add(conn: SqlitePool, todo: Todo) -> Result<(), ()> {
+        let result = sqlx::query!(
+            "insert into todos (title, msg) values ($1, $2)",
+            todo.title,
+            todo.msg
+        )
+        .execute(&conn)
+        .await;
+        if result.unwrap().rows_affected() != 1 {
+            return Err(());
         }
+        Ok(())
     }
-    fn update(&mut self, todo: Todo) {
-        let to_update = self.0.iter_mut().find(|t| t.title == todo.title);
-        let Some(to_update) = to_update else {
-            println!("cannot find a todo item with that title");
-            return;
-        };
-        to_update.message = todo.message.to_string();
+    async fn list(conn: SqlitePool) -> Result<(), ()> {
+        let result = sqlx::query_as!(Todo, "select * from todos")
+            .fetch_all(&conn)
+            .await;
+        if let Err(_) = result {
+            println!("error reading from todos");
+            return Err(());
+        }
+        for r in result.unwrap() {
+            println!("{} - {}", r.title, r.msg);
+        }
+        Ok(())
     }
-    fn delete(&mut self, title: &String) {
-        let delete_index = self.0.iter().position(|t| &t.title == title);
-        let Some(delete_index) = delete_index else {
-            println!("cannot find a todo item with that title");
-            return;
-        };
-        self.0.remove(delete_index);
+    async fn update(conn: SqlitePool, todo: Todo) -> Result<(), ()> {
+        let result = sqlx::query!(
+            "update todos set title = $1, msg = $2 where title = $1",
+            todo.title,
+            todo.msg
+        )
+        .execute(&conn)
+        .await;
+        if result.unwrap().rows_affected() != 1 {
+            return Err(());
+        }
+        Ok(())
+    }
+    async fn delete(conn: SqlitePool, title: &String) -> Result<(), ()> {
+        let result = sqlx::query!("delete from todos where title = $1", title)
+            .execute(&conn)
+            .await;
+        if result.unwrap().rows_affected() != 1 {
+            return Err(());
+        }
+        Ok(())
     }
 }
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
+    dotenv::dotenv().ok();
     let args = Args::parse();
 
-    use sqlx::Connection;
-    let conn = SqliteConnection::connect(&env::var("DATABASE_URL").unwrap()).await;
-    let Ok(conn) = conn else {
+    let pool = SqlitePoolOptions::new()
+        .max_connections(5)
+        .connect(&env::var("DATABASE_URL").expect("DATABASE_URL missing"))
+        .await;
+
+    let Ok(pool) = pool else {
         eprintln!("cannot connect to db");
         return;
     };
 
-    let file_str = match fs::read_to_string("data.json") {
-        Ok(file) => file,
-        Err(_) => {
-            let empty: Vec<Todo> = Vec::new();
-            let json_str = serde_json::to_string_pretty(&empty).unwrap();
-            fs::write("data.json", &json_str).unwrap();
-            json_str
-        }
-    };
+    sqlx::migrate!()
+        .run(&pool)
+        .await
+        .expect("Migrations failed to run");
 
-    let todo_list: Vec<Todo> = serde_json::from_str(&file_str).unwrap();
-    let mut list = TodoList(todo_list);
     match args.command {
         Command::Add => {
             let Some(args) = args.args_check() else {
                 return;
             };
-            list.add(Todo {
-                title: args.0.to_string(),
-                message: args.1.to_string(),
-            });
+            Todo::add(
+                pool,
+                Todo {
+                    title: args.0.to_string(),
+                    msg: args.1.to_string(),
+                },
+            )
+            .await
+            .unwrap();
         }
-        Command::List => list.print(),
+        Command::List => {
+            Todo::list(pool).await.unwrap();
+        }
         Command::Update => {
             let Some(args) = args.args_check() else {
                 return;
             };
             let title = args.0;
             let message = args.1;
-            list.update(Todo {
-                title: title.to_string(),
-                message: message.to_string(),
-            })
+            Todo::update(
+                pool,
+                Todo {
+                    title: title.to_string(),
+                    msg: message.to_string(),
+                },
+            )
+            .await
+            .unwrap();
         }
         Command::Delete => {
             let Some(title) = args.title else {
                 println!("--title is required");
                 return;
             };
-            list.delete(&title);
+            Todo::delete(pool, &title).await.unwrap();
         }
     }
-
-    let json_str = serde_json::to_string_pretty(&list.0).unwrap();
-    fs::write("data.json", &json_str).unwrap();
 }
