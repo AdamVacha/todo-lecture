@@ -1,46 +1,15 @@
-use std::{env, fmt::Debug};
+use axum::{http::StatusCode, routing::get};
+use std::env;
 
-use clap::{Parser, ValueEnum};
+use axum::{
+    extract::{self, State},
+    response::IntoResponse,
+    Json, Router,
+};
 use serde::{Deserialize, Serialize};
 use sqlx::{sqlite::SqlitePoolOptions, SqlitePool};
 
-#[derive(ValueEnum, Debug, Clone)]
-enum Command {
-    Add,    //C
-    List,   //R
-    Update, //U
-    Delete, //D
-}
-
 /// Simple program to track todo items
-#[derive(Parser, Debug)]
-#[command(author, version, about, long_about = None)]
-struct Args {
-    /// Name of the command
-    command: Command,
-    // Todo title
-    #[arg(short, long)]
-    title: Option<String>,
-    // Todo message
-    #[arg(short, long)]
-    message: Option<String>,
-}
-
-impl Args {
-    fn args_check(&self) -> Option<(&String, &String)> {
-        let Some(title) = &self.title else {
-            println!("--title is required");
-            return None;
-        };
-        let Some(message) = &self.message else {
-            println!("--message is required");
-            return None;
-        };
-
-        Some((title, message))
-    }
-}
-
 #[derive(Debug, Serialize, Deserialize)]
 struct Todo {
     title: String,
@@ -61,7 +30,7 @@ impl Todo {
         }
         Ok(())
     }
-    async fn list(conn: SqlitePool) -> Result<(), ()> {
+    async fn list(conn: SqlitePool) -> Result<Vec<Todo>, ()> {
         let result = sqlx::query_as!(Todo, "select * from todos")
             .fetch_all(&conn)
             .await;
@@ -69,10 +38,7 @@ impl Todo {
             println!("error reading from todos");
             return Err(());
         }
-        for r in result.unwrap() {
-            println!("{} - {}", r.title, r.msg);
-        }
-        Ok(())
+        Ok(result.unwrap())
     }
     async fn update(conn: SqlitePool, todo: Todo) -> Result<(), ()> {
         let result = sqlx::query!(
@@ -101,7 +67,6 @@ impl Todo {
 #[tokio::main(flavor = "current_thread")]
 async fn main() {
     dotenv::dotenv().ok();
-    let args = Args::parse();
 
     let pool = SqlitePoolOptions::new()
         .max_connections(5)
@@ -118,46 +83,48 @@ async fn main() {
         .await
         .expect("Migrations failed to run");
 
-    match args.command {
-        Command::Add => {
-            let Some(args) = args.args_check() else {
-                return;
-            };
-            Todo::add(
-                pool,
-                Todo {
-                    title: args.0.to_string(),
-                    msg: args.1.to_string(),
-                },
-            )
-            .await
-            .unwrap();
-        }
-        Command::List => {
-            Todo::list(pool).await.unwrap();
-        }
-        Command::Update => {
-            let Some(args) = args.args_check() else {
-                return;
-            };
-            let title = args.0;
-            let message = args.1;
-            Todo::update(
-                pool,
-                Todo {
-                    title: title.to_string(),
-                    msg: message.to_string(),
-                },
-            )
-            .await
-            .unwrap();
-        }
-        Command::Delete => {
-            let Some(title) = args.title else {
-                println!("--title is required");
-                return;
-            };
-            Todo::delete(pool, &title).await.unwrap();
-        }
-    }
+    // build our application with a route
+    let app = Router::new()
+        .route("/health", get(health))
+        .route(
+            "/todos",
+            get(get_todos)
+                .put(put_todos)
+                .patch(patch_todos)
+                .delete(delete_todos),
+        )
+        .with_state(pool);
+    // run our app with hyper, listening globally on port 3000
+    let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+// basic handler that responds with a static string
+async fn health() -> impl IntoResponse {
+    StatusCode::OK
+}
+
+async fn get_todos(State(pool): State<SqlitePool>) -> impl IntoResponse {
+    let todos = Todo::list(pool).await.unwrap();
+    Json(todos)
+}
+
+async fn put_todos(
+    State(pool): State<SqlitePool>,
+    extract::Json(todo): extract::Json<Todo>,
+) -> impl IntoResponse {
+    Todo::add(pool, todo).await.unwrap()
+}
+
+async fn patch_todos(
+    State(pool): State<SqlitePool>,
+    extract::Json(todo): extract::Json<Todo>,
+) -> impl IntoResponse {
+    Todo::update(pool, todo).await.unwrap()
+}
+
+async fn delete_todos(
+    State(pool): State<SqlitePool>,
+    extract::Json(todo): extract::Json<Todo>,
+) -> impl IntoResponse {
+    Todo::delete(pool, &todo.title).await.unwrap()
 }

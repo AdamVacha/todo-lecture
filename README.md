@@ -2,4 +2,10 @@
 
 ## How to run
 
-Add todo: `cargo run add -t test -m "test"`
+### Env
+
+Fill out `.env` from `.env.example`
+
+### Run
+
+`cargo run`
